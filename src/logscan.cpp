@@ -5,6 +5,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -35,6 +36,27 @@ std::string lowercase_copy(std::string value) {
     return value;
 }
 
+bool equals_lower(const std::string& s, const std::string& lower_word) {
+    if (s.size() != lower_word.size()) return false;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (std::tolower(s[i]) != lower_word[i]) return false;
+    }
+    return true;
+}
+
+bool contains_lower(const std::string& s, const std::string& lower_word) {
+    if (lower_word.size() > s.size()) return false;
+    for (std::size_t start = 0; start + lower_word.size() <= s.size(); ++start) {
+        std::size_t i = 0;
+        while (i < lower_word.size() &&
+               std::tolower(s[start + i]) == lower_word[i]) {
+            ++i;
+        }
+        if (i == lower_word.size()) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 std::vector<LogRecord> load_logs(const std::string& path) {
@@ -47,53 +69,84 @@ std::vector<LogRecord> load_logs(const std::string& path) {
     std::string line;
 
     while (std::getline(input, line)) {
-        const auto fields = split_fields(line);
+        auto fields = split_fields(line);
         if (fields.size() != 4) {
             continue;
         }
 
         LogRecord record;
-        record.timestamp = fields[0];
-        record.severity = fields[1];
-        record.component = fields[2];
-        record.message = fields[3];
-        logs.push_back(record);
+        record.timestamp = std::move(fields[0]);
+        record.severity = std::move(fields[1]);
+        record.component = std::move(fields[2]);
+        record.message = std::move(fields[3]);
+        logs.push_back(std::move(record));
     }
 
     return logs;
 }
 
-SearchResult search_logs(const std::vector<LogRecord>& logs,
-                         const std::string& severity,
-                         const std::string& keyword) {
+SearchResult search_range(const std::vector<LogRecord>& logs,
+                          int begin, int end,
+                          const std::string& wanted_severity,
+                          const std::string& wanted_keyword) {
     SearchResult result;
-    const std::string wanted_severity = lowercase_copy(severity);
-    const std::string wanted_keyword = lowercase_copy(keyword);
 
-    for (const auto& record : logs) {
-        // Repeatedly creates lowercase copies for each record.
-        const std::string current_severity = lowercase_copy(record.severity);
-        const std::string current_message = lowercase_copy(record.message);
-
+    const std::string error_word = "error";
+    const std::string warning_word = "warning";
+    for (int i = begin; i < end; ++i) {
+        const auto& record = logs[i];
+        // // Repeatedly creates lowercase copies for each record.
+        // const std::string current_severity = lowercase_copy(record.severity);
+        // const std::string current_message = lowercase_copy(record.message);
         const bool severity_matches =
-            wanted_severity == "all" || current_severity == wanted_severity;
+            wanted_severity == "all" || equals_lower(record.severity, wanted_severity);
         const bool keyword_matches =
-            wanted_keyword.empty() ||
-            current_message.find(wanted_keyword) != std::string::npos;
+            wanted_keyword.empty() || contains_lower(record.message, wanted_keyword);
 
         if (severity_matches && keyword_matches) {
             ++result.matched_records;
             result.message_bytes += record.message.size();
         }
 
-        if (current_severity == "error") {
+        if (equals_lower(record.severity, error_word)) {
             ++result.error_records;
         }
-        if (current_severity == "warning") {
+        if (equals_lower(record.severity, warning_word)) {
             ++result.warning_records;
         }
     }
 
+    return result;
+}
+
+SearchResult search_logs(const std::vector<LogRecord>& logs,
+                         const std::string& severity,
+                         const std::string& keyword) {
+    const std::string wanted_severity = lowercase_copy(severity);
+    const std::string wanted_keyword = lowercase_copy(keyword);
+
+    const int n = 8;
+    const int count =logs.size();
+
+    SearchResult partial[n];
+    std::thread threads[n];
+
+    for (int t = 0; t < n; ++t) {
+        const int begin = count * t / n;
+        const int end = count * (t + 1) / n;
+        threads[t] = std::thread([&, t, begin, end] {
+            partial[t] = search_range(logs, begin, end, wanted_severity, wanted_keyword);
+        });
+    }
+
+    SearchResult result;
+    for (int t = 0; t < n; ++t) {
+        threads[t].join();
+        result.matched_records += partial[t].matched_records;
+        result.error_records += partial[t].error_records;
+        result.warning_records += partial[t].warning_records;
+        result.message_bytes += partial[t].message_bytes;
+    }
     return result;
 }
 
